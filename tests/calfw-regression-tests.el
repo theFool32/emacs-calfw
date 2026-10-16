@@ -1,0 +1,123 @@
+;;; calfw-regression-tests.el --- Query and cross-month regressions -*- lexical-binding: t; -*-
+(require 'ert)
+(require 'calfw-macos)
+(require 'calfw-org)
+(require 'calfw-modern)
+
+(ert-deftest cfw-regression-fast-helper-does-not-use-open-wait ()
+  (let ((cfw:macos-query-timeout 1) files)
+    (cl-letf (((symbol-function 'cfw:macos--ensure-helper) (lambda () "unused"))
+              ((symbol-function 'process-file)
+               (lambda (_program _in _out _display &rest args)
+                 (should-not (member "-W" args))
+                 (let ((stdout (cadr (member "--stdout" args))))
+                   (setq files (list stdout (cadr (member "--stderr" args))))
+                   (with-temp-file stdout (insert "{\"version\":1,"))
+                   ;; The launcher exits before the helper completes its output.
+                   (run-at-time 0.02 nil (lambda () (write-region "\"authorization\":\"full-access\"}\n" nil stdout t 'silent))))
+                 0)))
+      (should (equal "full-access" (alist-get 'authorization (cfw:macos--call "status")))))
+    (dolist (file files) (should-not (file-exists-p file)))))
+
+(ert-deftest cfw-regression-query-timeout-cleans-response-files ()
+  (let ((cfw:macos-query-timeout 0.03) files)
+    (cl-letf (((symbol-function 'cfw:macos--ensure-helper) (lambda () "unused"))
+              ((symbol-function 'process-file)
+               (lambda (_program _in _out _display &rest args)
+                 (setq files (list (cadr (member "--stdout" args)) (cadr (member "--stderr" args))))
+                 0)))
+      (should-error (cfw:macos--call "status")))
+    (dolist (file files) (should-not (file-exists-p file)))))
+
+(ert-deftest cfw-regression-authorize-waits-for-result-after-launcher-exits ()
+  (let ((stdout (make-temp-file "calfw-auth-test-"))
+        (stderr (make-temp-file "calfw-auth-test-"))
+        (cfw:macos--access-pending t) warning)
+    (cl-letf (((symbol-function 'display-warning) (lambda (&rest args) (setq warning args))))
+      (cfw:macos--check-access stdout stderr (+ (float-time) 1))
+      (should cfw:macos--access-pending)
+      (with-temp-file stdout (insert "{\"version\":1,\"authorization\":\"full-access\"}\n"))
+      (let ((deadline (+ (float-time) 1)))
+        (while (and cfw:macos--access-pending (< (float-time) deadline)) (accept-process-output nil 0.02)))
+      (should-not cfw:macos--access-pending)
+      (should-not warning)
+      (should-not (file-exists-p stdout))
+      (should-not (file-exists-p stderr)))))
+
+(ert-deftest cfw-regression-org-range-does-not-require-dotime ()
+  (dolist (record '(((10 28 2026) "(1/8): ") ((11 1 2026) "(5/8): ")
+                    ((11 3 2026) "(7/8): ") ((11 4 2026) "(8/8): ")))
+    (let ((range (cfw:org-get-timerange (propertize "Range" 'date (car record) 'extra (cadr record)))))
+      (should (equal '(10 28 2026) (car range)))
+      (should (equal '(11 4 2026) (cadr range))))))
+
+(ert-deftest cfw-regression-org-range-across-year-and-dst-uses-calendar-days ()
+  (dolist (record '(((1 2 2027) "(4/6): " (12 30 2026) (1 4 2027))
+                    ((11 2 2026) "(4/5): " (10 30 2026) (11 3 2026))))
+    (let ((range (cfw:org-get-timerange (propertize "Range" 'date (car record) 'extra (cadr record)))))
+      (should (equal (nth 2 record) (car range)))
+      (should (equal (nth 3 record) (cadr range))))))
+
+(ert-deftest cfw-regression-november-view-keeps-full-october-scheduled-range ()
+  (let* ((file (make-temp-file "calfw-cross-month-" nil ".org"))
+         (org-agenda-files (list file))
+         (org-todo-keywords-for-agenda '("TODO" "WAITING" "DONE"))
+         (cfw:display-calendar-holidays nil)
+         (cfw:org-agenda-schedule-args nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO WAITING | DONE\n* WAITING 跨月活动\nSCHEDULED: <2026-10-28 Wed>--<2026-11-04 Wed>\n"))
+          ;; Each independent query starts after the first day of the block.
+          (dolist (date '((11 1 2026) (11 2 2026) (11 3 2026) (11 4 2026)))
+            (let ((model (cfw:view-model-make-common-data
+                          (cfw:model-abstract-new date (list (cfw:org-create-source)) nil)
+                          date date)))
+              (should (= 1 (length (cfw:model-get-periods-by-date date model))))
+              (should (string-match-p "跨月活动" (cfw:details-layout date model)))))
+          (let* ((sources (list (cfw:org-create-source)))
+                 (model (cfw:view-month-model (cfw:model-abstract-new '(11 2 2026) sources nil))))
+            (dolist (day '(1 2 3 4))
+              (should (= 1 (length (cfw:model-get-periods-by-date (list 11 day 2026) model)))))
+            (should-not (cfw:model-get-periods-by-date '(11 5 2026) model))))
+      (when-let* ((buffer (get-file-buffer file))) (kill-buffer buffer))
+      (delete-file file))))
+
+(ert-deftest cfw-regression-refresh-restores-system-sources-after-initial-failure ()
+  (let ((cfw:display-style 'modern) (cfw:display-calendar-holidays nil)
+        (org-agenda-files nil) (calls 0) warnings)
+    (cl-letf (((symbol-function 'display-warning) (lambda (&rest args) (push args warnings)))
+              ((symbol-function 'cfw:macos-create-sources)
+               (lambda ()
+                 (cl-incf calls)
+                 (if (= calls 1) (error "Transient launch failure")
+                   (list (make-cfw:source :name "System" :update #'cfw:macos-clear-cache
+                                          :data (lambda (&rest _) nil)))))))
+      (save-window-excursion
+        (cfw:open-org-calendar)
+        (with-current-buffer (window-buffer (selected-window))
+          (should (= 1 (length (cfw:cp-get-contents-sources (cfw:cp-get-component)))))
+          (cfw:refresh-calendar-buffer nil)
+          (should (= 2 (length (cfw:cp-get-contents-sources (cfw:cp-get-component)))))
+          (cfw:refresh-calendar-buffer nil)
+          (should (= 2 (length (cfw:cp-get-contents-sources (cfw:cp-get-component))))))))
+    (should warnings)))
+
+(ert-deftest cfw-regression-switching-views-keeps-system-sources ()
+  (let* ((cfw:display-style 'modern) (cfw:display-calendar-holidays nil)
+         (date '(11 2 2026))
+         (source (make-cfw:source
+                  :name "System" :color "blue"
+                  :data (lambda (_begin _end)
+                          (list (make-cfw:event :title "Meeting" :start-date date
+                                                :start-time '(9 0) :end-time '(10 0)))))))
+    (save-window-excursion
+      (let ((cp (cfw:create-calendar-component-buffer :date date :view 'two-weeks :contents-sources (list source))))
+        (with-current-buffer (cfw:cp-get-buffer cp)
+          (dolist (view '(day week month two-weeks day month week))
+            (cfw:cp-set-view cp view)
+            (should (eq view (cfw:component-view cp)))
+            (should (= 1 (length (cfw:cp-get-contents-sources cp))))
+            (should (string-match-p "Meeting" (cfw:details-layout date (cfw:component-model cp))))))))))
+
+;;; calfw-regression-tests.el ends here

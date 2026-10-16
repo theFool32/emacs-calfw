@@ -82,6 +82,7 @@ Following programs are also useful:
 - calfw-ical.el : Display schedules of the iCalendar format, such as the google calendar.
 - calfw-org.el  : Display org schedules (http://orgmode.org/)
 - calfw-cal.el  : Display diary schedules.
+- calfw-macos.el : Display selected macOS system calendars alongside Org.
 
 ## Setting example:
 
@@ -158,6 +159,119 @@ Here is the program which helps synchronization schedule items between org and g
 - https://github.com/myuhe/org-gcal.el
     - [Org-modeとGoogle calendar間で予定をやりとりするorg-gcal.elというのを作りました](http://sheephead.homelinux.org/2014/03/14/7023/)
     - [calfwとorg-gcalの連携](http://sheephead.homelinux.org/2014/03/15/7035/)
+
+### Calendar presentation
+
+The default `cfw:display-style` is `modern`, implemented in `calfw-modern.el`.
+It uses the existing calendar sources and `cfw:` commands; no calfw 2.0 or
+additional package is required. The layout takes inspiration from
+[maccalfw](https://github.com/haji-ali/maccalfw) and
+[calfw-blocks / calfw-transpose](https://github.com/haji-ali/calfw-blocks):
+
+- **Two Weeks**: two columns, one week per column, with wider day cards for
+  long titles. Up/down (or `k`/`j`) move one day; left/right (or `h`/`l`)
+  move one week, matching the two-column layout. In narrow single-column
+  windows, up/down move one day and left/right stay in place. Toolbar paging
+  and the explicit next/previous-day/week commands retain their date steps.
+  Dates show item counts; overflow shows a clickable remaining count. Press `SPC` (or your existing details key) to see the complete day.
+- **Week / Day**: appointments appear as time blocks in source colours;
+  untimed tasks and all-day items appear above the time grid. Overlapping
+  events use separate lanes; crowded lanes show a clickable overflow count.
+- **Month**: compact day cards retain the familiar seven-column overview.
+- Source labels live at the top, wrap within the available width, and show
+  full account names on hover. Colour accents and tinted event backgrounds
+  adapt to the frame's dark or light background.
+- Buffer layouts use the window body size, keep headings at the grid's line
+  height, and refit when the window changes size. Narrow windows use full-width
+  day cards and may scroll vertically. The source legend remains at the top.
+
+`cfw:modern-day-start` and `cfw:modern-day-end` set the normal visible hours
+(default 08:00–20:00); the range expands to include appointments outside them.
+Org markers, link bindings, date navigation and the complete day details are
+preserved. The renderer does not modify tasks or events. To retain the original
+presentation, set `cfw:display-style` to `classic` and reopen or refresh.
+
+Renderer tests:
+
+```sh
+emacs --batch -Q -L . -l tests/calfw-modern-tests.el -f ert-run-tests-batch-and-exit
+```
+
+Org timestamp ranges are inclusive and are reconstructed from any visible
+block day, including when the range begins in a previous month or year.
+
+### For macOS Calendar users
+
+`calfw-macos.el` adds **read-only** EventKit sources to the existing
+`cfw:open-org-calendar` command. It uses the accounts already synchronized by
+macOS Calendar, including iCloud, CalDAV and Exchange. The bridge follows
+[maccalfw](https://github.com/haji-ali/maccalfw)'s EventKit approach and supports
+this branch's `cfw:` API without requiring calfw 2.0 or an Emacs dynamic module.
+
+System calendars are **disabled by default**. To enable them:
+
+1. Install Apple's Command Line Tools if `swiftc` is unavailable:
+   `xcode-select --install`.
+2. Run `M-x cfw:macos-request-access`. The first run compiles a small helper
+   application and asks macOS for calendar access. Wait for the success message.
+   The permission belongs to **Calfw Calendar**; no changes to Emacs.app or daemon
+   restart are needed. On macOS 14+, reading events requires the system's
+   **Full Access** permission, even though this helper only reads events.
+3. Run `M-x cfw:macos-list-calendars` to see the account names, calendar titles
+   and local identifiers provided by EventKit.
+4. Run `M-x customize-group RET cfw-macos RET`. Set `cfw:macos-calendars` to
+   **Selected calendars** and add the calendars you want, then Apply and Save.
+5. Reopen `M-x cfw:open-org-calendar` (or your existing shortcut). Its existing commands and
+   Org navigation remain available; system calendars have their own names/colors.
+   Press `r` to clear the event cache, retry system sources and refresh. A
+   temporary launch failure no longer requires closing and reopening the view.
+
+`cfw:macos-calendars` accepts a title, an account/title pair, or an ID selector
+for each selected calendar. For example, the *value* of the option can be:
+
+```el
+("日程" "携程" ("caldav.feishu.cn" . "李杰"))
+```
+
+Use account names from `cfw:macos-list-calendars`; they may differ from the
+Calendar app's sidebar labels. A title matching multiple calendars raises an
+error rather than choosing one arbitrarily. `(ACCOUNT . TITLE)` pairs travel
+between computers; `(:id "LOCAL-ID")` selects a specific local calendar.
+Set the option to `t` to include every calendar subject to exclusions, or `nil`
+to turn the integration off.
+
+**Avoiding duplicate Org events:** `cfw:macos-excluded-calendars` defaults to
+`("Org")`. Keep the local Org source and exclude its synchronized system calendar.
+Exclusions take precedence over inclusion and accept the same selector formats.
+There is no title-based event deduplication, so distinct meetings and separate
+occurrences of a repeating event remain visible. No source events are changed.
+
+Queries cover only the displayed dates. EventKit expands repeating events;
+all-day end dates are converted from exclusive to calfw's inclusive periods.
+Timed events use Emacs's local time zone. Queries are shared across calendar
+sources and cached for `cfw:macos-cache-seconds` (default 60 seconds).
+The launcher does not use `open -W`, which can race with a short-lived helper
+on macOS. Queries wait for a complete JSON response, up to
+`cfw:macos-query-timeout` (default 15 seconds). Authorization waits asynchronously
+for the helper result, so it does not block Emacs.
+If access is unavailable when opening the Org view, calfw reports the error and
+still opens the local Org calendar. Press `r` to retry connecting system sources. No permission prompt is issued during startup
+or ordinary refresh. Authorize explicitly with `cfw:macos-request-access`.
+
+The helper source `calfw-macos.swift` must be installed alongside
+`calfw-macos.el`. Symlink-based installers can also find it beside the real
+`.el` source; copy-based package recipes must include `calfw-macos.swift`.
+Builds live in `cfw:macos-helper-directory`, outside the package checkout, and are
+compiled separately on each Mac. Run `cfw:macos-build-helper` to rebuild explicitly.
+On other operating systems, Org calendars continue to work without this helper.
+
+Tests (provide the existing `s` dependency on `load-path`):
+
+```sh
+emacs --batch -Q -L . -L /path/to/s \
+  -l tests/calfw-macos-tests.el -l tests/calfw-modern-tests.el \
+  -l tests/calfw-regression-tests.el -f ert-run-tests-batch-and-exit
+```
 
 ### For iCal (Google Calendar) users:
 

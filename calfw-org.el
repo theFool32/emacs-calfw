@@ -34,6 +34,7 @@
 ;;; Code:
 
 (require 'calfw)
+(require 'calfw-macos)
 (require 'org)
 (require 'org-agenda)
 (require 'org-element)
@@ -242,25 +243,20 @@ If this function splits into a list of string, the calfw displays those string i
    (t date)))
 
 (defun cfw:org-get-timerange (text)
-  "Return a range object (begin end text).
-If TEXT does not have a range, return nil."
-  (let* ((dotime (cfw:org-tp text 'dotime)))
-    (and (stringp dotime) (string-match org-ts-regexp dotime)
-         (let ((date-string  (match-string 1 dotime))
-	           (extra (cfw:org-tp text 'extra)))
-	       (if (string-match "(\\([0-9]+\\)/\\([0-9]+\\)): " extra)
-	           (let* ((cur-day (string-to-number
-			                    (match-string 1 extra)))
-		              (total-days (string-to-number
-				                   (match-string 2 extra)))
-                      (start-date (org-read-date nil t date-string))
-		              (end-date (time-add
-                                 start-date
-			                     (seconds-to-time (* 3600 24 (- total-days 1))))))
-	             (unless (= cur-day total-days)
-                   (list (calendar-gregorian-from-absolute (time-to-days start-date))
-		                 (calendar-gregorian-from-absolute (time-to-days end-date)) text)))
-	         )))))
+  "Return the inclusive (BEGIN END TEXT) range represented by TEXT.
+Org supplies a (DAY/TOTAL) counter on every block day, but dotime only
+on the first and last day.  Derive the full range from the record's date
+so a view starting in the middle of a block still includes it."
+  (let ((extra (cfw:org-tp text 'extra))
+        (date (cfw:org-normalize-date (cfw:org-tp text 'date))))
+    (when (and (stringp extra)
+               (string-match "(\\([0-9]+\\)/\\([0-9]+\\)): " extra))
+      (let ((day (string-to-number (match-string 1 extra)))
+            (total (string-to-number (match-string 2 extra))))
+        (when (and date (> total 1) (<= 1 day total))
+          (let ((begin (- (calendar-absolute-from-gregorian date) (1- day))))
+            (list (calendar-gregorian-from-absolute begin)
+                  (calendar-gregorian-from-absolute (+ begin (1- total))) text)))))))
 
 (defun cfw:org-schedule-period-to-calendar (begin end)
   "[internal] Return calfw calendar items between BEGIN and END
@@ -486,15 +482,36 @@ TEXT1 < TEXT2. This function makes no-time items in front of timed-items."
    :opt-period-face '(:slant italic)
    :data 'cfw:org-schedule-period-to-calendar))
 
+(defun cfw:org--refresh-system-sources ()
+  "Retry system sources when refreshing an Org calendar.
+A failed initial query must not leave the view permanently Org-only."
+  (let ((component (cfw:cp-get-component)))
+    (when component
+      (condition-case err
+          (let* ((sources (cfw:cp-get-contents-sources component))
+                 (local (cl-remove-if
+                         (lambda (source) (eq (cfw:source-update source) #'cfw:macos-clear-cache))
+                         sources)))
+            (cfw:macos-clear-cache)
+            (cfw:model-set-contents-sources (append local (cfw:macos-create-sources))
+                                           (cfw:component-model component)))
+        (error (display-warning 'cfw-macos (error-message-string err)))))))
+
 (defun cfw:open-org-calendar ()
   "Open an org schedule calendar in the new buffer."
   (interactive)
   (save-excursion
-    (let* ((source1 (cfw:org-create-source))
+    (let* ((source1 (let ((source (cfw:org-create-source)))
+                      (setf (cfw:source-update source) #'cfw:org--refresh-system-sources)
+                      source))
            (curr-keymap (if cfw:org-overwrite-default-keybinding cfw:org-custom-map cfw:org-schedule-map))
            (cp (cfw:create-calendar-component-buffer
                 :view cfw:org-calendar-default-view
-                :contents-sources (list source1)
+                :contents-sources
+                (cons source1
+                      (condition-case err
+                          (cfw:macos-create-sources)
+                        (error (display-warning 'cfw-macos (error-message-string err)) nil)))
                 :custom-map curr-keymap
                 :sorter 'cfw:org-schedule-sorter)))
       (switch-to-buffer (cfw:cp-get-buffer cp))

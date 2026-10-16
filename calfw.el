@@ -77,6 +77,13 @@
 
 ;;; Customs
 
+(defcustom cfw:display-style 'modern
+  "Calendar presentation style.
+Modern uses source-coloured cards, a two-column fortnight and time blocks.
+Classic retains the original calendar grid."
+  :group 'cfw
+  :type '(choice (const modern) (const classic)))
+
 (defcustom cfw:fchar-vertical-line ?|
   "The character used for drawing vertical lines."
   :group 'cfw
@@ -731,12 +738,15 @@ The following values are possible:
                                      (cfw:find-all-by-date
                                       dest date
                                       (lambda (begin end)
-                                        (let ((overlay (make-overlay begin end)))
-                                          (overlay-put overlay 'face
-                                                       (if (eq 'cfw:face-day-title
-                                                               (get-text-property begin 'face))
-                                                           'cfw:face-select))
-                                          (push overlay ols)))))
+                                        (when (or (not (eq cfw:display-style 'modern))
+                                                  (get-text-property begin 'cfw:modern-header))
+                                          (let ((overlay (make-overlay begin end)))
+                                            (overlay-put overlay 'face
+                                                         (if (eq cfw:display-style 'modern)
+                                                             'cfw:modern-active-button
+                                                           (if (eq 'cfw:face-day-title (get-text-property begin 'face))
+                                                               'cfw:face-select)))
+                                            (push overlay ols))))))
                (setf (cfw:dest-select-ol dest) ols)))
 
 (defun cfw:dest-ol-today-clear (dest)
@@ -752,12 +762,15 @@ The following values are possible:
                                      (cfw:find-all-by-date
                                       dest (calendar-current-date)
                                       (lambda (begin end)
-                                        (let ((overlay (make-overlay begin end)))
-                                          (overlay-put overlay 'face
-                                                       (if (eq 'cfw:face-day-title
-                                                               (get-text-property begin 'face))
-                                                           'cfw:face-today-title 'cfw:face-today))
-                                          (push overlay ols)))))
+                                        (when (or (not (eq cfw:display-style 'modern))
+                                                  (get-text-property begin 'cfw:modern-header))
+                                          (let ((overlay (make-overlay begin end)))
+                                            (overlay-put overlay 'face
+                                                         (if (eq cfw:display-style 'modern)
+                                                             'cfw:modern-today
+                                                           (if (eq 'cfw:face-day-title (get-text-property begin 'face))
+                                                               'cfw:face-today-title 'cfw:face-today)))
+                                            (push overlay ols))))))
                (setf (cfw:dest-today-ol dest) ols)))
 
 
@@ -791,14 +804,17 @@ keymap `cfw:calendar-mode-map'."
           :min-func 'point-min
           :max-func 'point-max
           :buffer buffer
-          :width (or width (window-width window))
-          :height (or height (window-height window))
+          :width (or width (window-body-width window))
+          :height (or height (window-body-height window))
           :clear-func (lambda ()
                         (with-current-buffer buffer
                           (erase-buffer)))))
    (with-current-buffer buffer
      (unless (eq major-mode 'cfw:calendar-mode)
        (cfw:calendar-mode custom-map)))
+   ;; Major-mode setup may remove a previous header line and change the body.
+   (setf (cfw:dest-width dest) (or width (window-body-width window))
+         (cfw:dest-height dest) (or height (window-body-height window)))
    dest))
 
 ;; Region
@@ -819,8 +835,8 @@ the calfw is responsible to manage the buffer and key maps."
      :min-func (lambda () (marker-position mark-begin))
      :max-func (lambda () (marker-position mark-end))
      :buffer buf
-     :width (or width (window-width window))
-     :height (or height (window-height window))
+     :width (or width (window-body-width window))
+     :height (or height (window-body-height window))
      :clear-func
      (lambda ()
        (cfw:dest-region-clear (marker-position mark-begin)
@@ -849,8 +865,8 @@ the calfw is responsible to manage the buffer and key maps."
           :min-func 'point-min
           :max-func 'point-max
           :buffer buffer
-          :width (or width (window-width window))
-          :height (or height (window-height window))
+          :width (or width (window-body-width window))
+          :height (or height (window-body-height window))
           :clear-func (lambda ()
                         (with-current-buffer buffer
                           (erase-buffer)))))
@@ -982,8 +998,8 @@ VIEW is a symbol of the view type."
   (let* ((dest (cfw:component-dest component))
          (buf (cfw:dest-buffer dest))
          (window (or (and buf (get-buffer-window buf)) (selected-window))))
-    (setf (cfw:dest-width dest) (or width (window-width window))
-          (cfw:dest-height dest) (or height (window-height window))))
+    (setf (cfw:dest-width dest) (or width (window-body-width window))
+          (cfw:dest-height dest) (or height (window-body-height window))))
   (cfw:cp-update component))
 
 ;; Hook
@@ -1011,6 +1027,10 @@ HOOK is a function that has no argument."
   "[internal] Return a view function which is corresponding to the view symbol.
 VIEW is a symbol of the view type."
   (cond
+   ((and (eq cfw:display-style 'modern)
+         (memq view '(month week two-weeks day))
+         (require 'calfw-modern nil t))
+    #'cfw:modern-render)
    ((eq 'month     view)  'cfw:view-month)
    ((eq 'week      view)  'cfw:view-week)
    ((eq 'two-weeks view)  'cfw:view-two-weeks)
@@ -2266,6 +2286,46 @@ return an alist of rendering parameters."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Navigation
 
+(defvar-local cfw:navigation-layout nil
+  "Spatial layout of the rendered calendar.
+Nil uses the original grid.  `two-columns' has consecutive days vertically
+and weeks horizontally; `single-column' has only vertical neighbours.
+Renderers set this value when drawing the view.")
+
+(defun cfw:navi--direction (direction num)
+  "Move NUM steps in DIRECTION according to the rendered layout."
+  (let* ((component (cfw:cp-get-component))
+         (layout (and (eq cfw:display-style 'modern)
+                      (eq (cfw:component-view component) 'two-weeks)
+                      cfw:navigation-layout))
+         (vertical (if layout 1 cfw:week-days))
+         (horizontal (pcase layout ('two-columns cfw:week-days)
+                            ('single-column 0) (_ 1)))
+         (days (pcase direction ('up (- vertical)) ('down vertical)
+                      ('left (- horizontal)) ('right horizontal))))
+    (unless (zerop days)
+      (cfw:navi-next-day-command (* (or num 1) days)))))
+
+(defun cfw:navi-up-command (&optional num)
+  "Move NUM dates upward in the current calendar layout."
+  (interactive "p")
+  (cfw:navi--direction 'up num))
+
+(defun cfw:navi-down-command (&optional num)
+  "Move NUM dates downward in the current calendar layout."
+  (interactive "p")
+  (cfw:navi--direction 'down num))
+
+(defun cfw:navi-left-command (&optional num)
+  "Move NUM dates leftward in the current calendar layout."
+  (interactive "p")
+  (cfw:navi--direction 'left num))
+
+(defun cfw:navi-right-command (&optional num)
+  "Move NUM dates rightward in the current calendar layout."
+  (interactive "p")
+  (cfw:navi--direction 'right num))
+
 ;; Following functions assume that the current buffer is a calendar view.
 
 (defun cfw:cursor-to-date (&optional pos)
@@ -2378,20 +2438,20 @@ calendar view."
 (defvar cfw:calendar-mode-map
   (cfw:define-keymap
    '(
-     ("<right>" . cfw:navi-next-day-command)
+     ("<right>" . cfw:navi-right-command)
      ("f"       . cfw:navi-next-day-command)
-     ("<left>"  . cfw:navi-previous-day-command)
+     ("<left>" . cfw:navi-left-command)
      ("b"       . cfw:navi-previous-day-command)
-     ("<down>"  . cfw:navi-next-week-command)
+     ("<down>" . cfw:navi-down-command)
      ("n"       . cfw:navi-next-week-command)
-     ("<up>"    . cfw:navi-previous-week-command)
+     ("<up>" . cfw:navi-up-command)
      ("p"       . cfw:navi-previous-week-command)
 
      ;; Vi style
-     ("l" . cfw:navi-next-day-command)
-     ("h" . cfw:navi-previous-day-command)
-     ("j" . cfw:navi-next-week-command)
-     ("k" . cfw:navi-previous-week-command)
+     ("l" . cfw:navi-right-command)
+     ("h" . cfw:navi-left-command)
+     ("j" . cfw:navi-down-command)
+     ("k" . cfw:navi-up-command)
      ("^" . cfw:navi-goto-week-begin-command)
      ("$" . cfw:navi-goto-week-end-command)
 
@@ -2526,7 +2586,7 @@ With prefix arg NO-RESIZE, don't fit calendar to window size."
   (let ((cp (cfw:cp-get-component)))
     (when cp
       (unless no-resize
-        (cfw:cp-resize cp (window-width) (window-height)))
+        (cfw:cp-resize cp (window-body-width) (window-body-height)))
       (cl-loop for s in (cfw:cp-get-contents-sources cp)
             for f = (cfw:source-update s)
             if f do (funcall f))
