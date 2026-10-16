@@ -122,6 +122,10 @@ For example,
         (file   (get-text-property (point) 'cfw:org-file))
         (beg    (get-text-property (point) 'cfw:org-h-beg))
         (loc    (get-text-property (point) 'cfw:org-loc)))
+    ;; Show the source in the main window, not inside the small details popup.
+    ;; Capture all properties before closing the generated details buffer.
+    (when (and (eq major-mode 'cfw:details-mode) (or marker link beg))
+      (cfw:details-kill-buffer-command))
     (when link
       (org-link-open-from-string link))
     (when (and marker (marker-buffer marker))

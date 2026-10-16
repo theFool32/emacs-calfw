@@ -47,8 +47,16 @@ The range expands to include earlier and later appointments."
   '((((background dark)) :foreground "#bdd8f1" :background "#394650" :weight bold)
     (t :foreground "#245578" :background "#deebf5" :weight bold))
   "Active calendar view." :group 'cfw-modern)
+(defface cfw:modern-overflow
+  '((((background dark)) :foreground "#f6c177" :weight bold)
+    (t :foreground "#9b4b0b" :weight bold))
+  "Additional items that can be opened in the complete day details."
+  :group 'cfw-modern)
 
 (defvar-local cfw:modern--dimensions nil)
+(defvar-local cfw:modern--pixel-dimensions nil)
+(defvar-local cfw:modern--line-height nil)
+(defvar-local cfw:modern--rendering nil)
 (defvar-local cfw:modern--resize-timer nil)
 
 (defun cfw:modern--blend (front back weight)
@@ -172,8 +180,17 @@ The range expands to include earlier and later appointments."
     ;; Keep Org markers and link bindings; replace only presentation attributes.
     (remove-list-of-text-properties 0 (length text) '(face font-lock-face display invisible) text)
     (setq text (string-trim (replace-regexp-in-string "[\n\r]+" " " text)))
-    (list :text text :source source :start start :end finish :period (and begin t)
-          :done done :help (if event (cfw:event-detail item) text))))
+    (let* ((detail (if event (cfw:event-detail item) (copy-sequence item)))
+           (map (get-text-property 0 'keymap text))
+           (command (and (keymapp map) (lookup-key map (kbd "RET")))))
+      (when begin
+        (setq detail (concat (cfw:strtime begin) "–" (cfw:strtime end) "  " detail)))
+      (list :text text :source source :start start :end finish :period (and begin t)
+            :begin begin :finish-date end
+            :location (if event (cfw:event-location item) (get-text-property 0 'cfw:org-loc text))
+            :description (and event (cfw:event-description item))
+            :command command
+            :done done :help detail :detail detail))))
 
 (defun cfw:modern--entries (model date)
   "Collect DATE's entries in MODEL, with appointments in time order."
@@ -188,18 +205,21 @@ The range expands to include earlier and later appointments."
                          (let ((sa (plist-get a :start)) (sb (plist-get b :start)))
                            (cond ((not (eq (not (plist-get a :done)) (not (plist-get b :done))))
                                   (not (plist-get a :done)))
-                                 ((and sa sb) (< sa sb)) (sa t) (sb nil)
+                                 ((and sa sb) (< sa sb)) (sa nil) (sb t)
                                  (t (funcall (cfw:model-get-sorter model)
                                              (plist-get a :text) (plist-get b :text))))))))
     (cl-loop for item in items for index from 0
              collect (plist-put item :index index))))
 
-(defun cfw:modern--label (entry)
-  "Return ENTRY's label with an explicit time or period marker."
+(defun cfw:modern--label (entry &optional compact)
+  "Return ENTRY's label with a time or period marker.
+COMPACT uses just the start time; the symbol `title' omits the time."
   (let* ((text (plist-get entry :text)) (start (plist-get entry :start))
          (end (plist-get entry :end))
          (label (if start
-                    (format "%02d:%02d–%02d:%02d " (/ start 60) (% start 60) (/ end 60) (% end 60))
+                    (cond ((eq compact 'title) "")
+                          (compact (format "%02d:%02d " (/ start 60) (% start 60)))
+                          (t (format "%02d:%02d–%02d:%02d " (/ start 60) (% start 60) (/ end 60) (% end 60))))
                   (if (plist-get entry :period) "↔ " ""))))
     ;; Org summaries already contain the start time.
     (when (and start (string-match "\\`[0-9][0-9]:[0-9][0-9] +" text))
@@ -233,9 +253,38 @@ The range expands to include earlier and later appointments."
   "Render a clickable NUMBER of additional entries at WIDTH on DATE."
   (let ((map (make-sparse-keymap)))
     (define-key map [mouse-1] #'cfw:modern--more-click)
-    (propertize (cfw:modern--fit (if (< width 14) (format "+%d" number) (format "  还有 %d 项 ›" number)) width)
-                'cfw:date date 'face 'cfw:modern-muted 'mouse-face 'highlight
-                'help-echo "点击或按 s / SPC 查看当天全部事项" 'keymap map)))
+    (dolist (key '("RET" "SPC" "s"))
+      (define-key map (kbd key) #'cfw:show-details-command))
+    (propertize (cfw:modern--fit (if (< width 10) (format "+%d" number) (format "+%d 项 ›" number)) width)
+                'cfw:date date 'cfw:overflow-count number
+                'face 'cfw:modern-overflow 'mouse-face 'highlight
+                'help-echo (format "%d 项未展开；点击或按 RET / s / SPC 查看当天全部事项" number)
+                'keymap map)))
+
+(defun cfw:modern--entry-lines (entries date width capacity &optional compact)
+  "Fit ENTRIES on DATE into CAPACITY lines of WIDTH.
+Use single-line summaries when COMPACT or crowded. Always reserve room for
+an exact overflow count. Roomy cards may use two lines per item."
+  (let ((compact (or compact
+                     (> (cl-loop for entry in entries
+                                 sum (if (> (string-width (cfw:modern--label entry)) (max 1 (1- width))) 2 1))
+                        capacity)))
+        (remaining capacity) (shown 0) lines)
+    (dolist (entry entries)
+      (let ((space (- remaining (if (< (1+ shown) (length entries)) 1 0))))
+        (when (> space 0)
+          (let* ((text (cfw:modern--label entry compact))
+                 (wrapped (if compact (list text)
+                            (cfw:render-line-breaker-simple text (max 1 (1- width)) (min 2 space)))))
+            (dolist (line wrapped)
+              (push (cfw:modern--entry-line entry line width date) lines)
+              (cl-decf remaining))
+            (cl-incf shown)))))
+    (when (and (< shown (length entries)) (> remaining 0))
+      (push (cfw:modern--more (- (length entries) shown) width date) lines)
+      (cl-decf remaining))
+    (append (nreverse lines)
+            (make-list (max 0 remaining) (propertize (make-string width ?\s) 'cfw:date date)))))
 
 (defun cfw:modern--day-heading (date count width &optional compact)
   "Return a DATE heading with COUNT items, fitting WIDTH.
@@ -256,34 +305,20 @@ COMPACT uses just the day number for a monthly grid."
 (defun cfw:modern--card (model date width height &optional compact)
   "Return HEIGHT lines of a day card for MODEL and DATE at WIDTH."
   (let* ((entries (cfw:modern--entries model date))
-         (capacity (max 0 (1- height)))
-         (lines nil) (shown 0))
-    (dolist (entry entries)
-      (let* ((remaining (- capacity (length lines)))
-             (last (= shown (1- (length entries))))
-             (space (if last remaining (1- remaining))))
-        (when (> space 0)
-          (let* ((text (cfw:modern--label entry))
-                 (wrapped (cfw:render-line-breaker-simple text (max 1 (1- width))
-                                                        (min 2 space))))
-            (dolist (line wrapped)
-              (push (cfw:modern--entry-line entry line width date) lines))
-            (cl-incf shown)))))
-    (setq lines (nreverse lines))
-    (when (< shown (length entries))
-      (when (< (length lines) capacity)
-        (setq lines (append lines (list (cfw:modern--more (- (length entries) shown) width date))))))
+         (capacity (max 0 (1- height))))
     (append (list (cfw:modern--day-heading date (length entries) width compact))
-            lines (make-list (max 0 (- capacity (length lines)))
-                             (propertize (make-string width ?\s) 'cfw:date date)))))
+            (cfw:modern--entry-lines entries date width capacity compact))))
 
 (defun cfw:modern--cards (model rows width height &optional compact)
   "Insert ROWS of day cards within WIDTH and HEIGHT for MODEL."
   (let* ((columns (length (car rows))) (gap "  │  ")
          (cell-width (max 1 (/ (- width (* (1- columns) (string-width gap))) columns)))
-         (cell-height (max 2 (/ (- height (1- (length rows))) (length rows)))))
+         (row-count (length rows))
+         (card-lines (max (* 2 row-count) (- height (1- row-count)))))
     (cl-loop for row in rows for row-number from 0 do
-             (let ((cards (mapcar (lambda (date) (cfw:modern--card model date cell-width cell-height compact)) row)))
+             (let* ((cell-height (+ (/ card-lines row-count)
+                                    (if (< row-number (% card-lines row-count)) 1 0)))
+                    (cards (mapcar (lambda (date) (cfw:modern--card model date cell-width cell-height compact)) row)))
                (dotimes (line cell-height)
                  (insert (mapconcat (lambda (card) (nth line card)) cards
                                     (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")))
@@ -311,7 +346,7 @@ FIRST-MINUTE and LINES-PER-HOUR specify the time-to-row mapping."
                                      (lambda (a b) (< (plist-get a :start) (plist-get b :start)))))
         (let* ((entry (copy-sequence entry))
                (row (floor (* (- (plist-get entry :start) first-minute) (/ lines-per-hour 60.0))))
-               (last-row (max (+ row 2) (ceiling (* (- (plist-get entry :end) first-minute)
+               (last-row (max (+ row (if (< lines-per-hour 2) 1 2)) (ceiling (* (- (plist-get entry :end) first-minute)
                                                                    (/ lines-per-hour 60.0))))))
           (when (>= row group-end) (finish-group))
           (setq entry (plist-put entry :row row))
@@ -344,16 +379,29 @@ WIDTH, ROWS, FIRST-MINUTE and LINES-PER-HOUR define its geometry."
                               (if (> hidden 0) (cfw:modern--more hidden w date) (make-string w ?\s))))
                            (entry
                               (let* ((offset (- row (plist-get entry :row)))
-                                     (label (cfw:modern--label entry))
+                                     (label (cfw:modern--label entry (cond ((< w 12) 'title) ((< w 28) t))))
                                      (wrapped (cfw:render-line-breaker-simple label (max 1 (1- w))
                                                                             (- (plist-get entry :last-row) (plist-get entry :row))))
                                      (line (or (nth offset wrapped) "")))
                                 (cfw:modern--entry-line entry line w date)))
                            (t (propertize (make-string w ?\s) 'cfw:date date)))))))
-        (when (= 0 (% row lines-per-hour))
+        (when (or (= row 0)
+                  (/= (floor (/ row (float lines-per-hour)))
+                      (floor (/ (1- row) (float lines-per-hour)))))
           (add-face-text-property 0 (length text) '(:overline t) t text))
         (aset lines row text)))
     (append lines nil)))
+
+(defun cfw:modern--hidden-count (entries lines)
+  "Count ENTRIES that never appear in rendered LINES, once per item."
+  (let (shown)
+    (dolist (line lines)
+      (let ((pos 0))
+        (while (< pos (length line))
+          (when-let* ((index (get-text-property pos 'cfw:row-count line)))
+            (cl-pushnew index shown))
+          (setq pos (next-single-property-change pos 'cfw:row-count line (length line))))))
+    (cl-count-if-not (lambda (entry) (memq (plist-get entry :index) shown)) entries)))
 
 (defun cfw:modern--timeline (model days width height)
   "Insert source-coloured time blocks for DAYS in MODEL at WIDTH and HEIGHT."
@@ -371,40 +419,96 @@ WIDTH, ROWS, FIRST-MINUTE and LINES-PER-HOUR define its geometry."
                                    cfw:modern-day-end))))
          (task-lines (min 4 (apply #'max 0 (mapcar #'length untimed))))
          (hours (max 1 (- last-hour first-hour)))
-         (lines-per-hour (max 1 (/ (- height task-lines 3) hours)))
-         (rows (* lines-per-hour hours)))
+         ;; Reserve the heading, divider and a per-day overflow summary.
+         ;; Short windows compress the time axis instead of losing late events.
+         (available-rows (max 1 (- height task-lines 3)))
+         (lines-per-hour (/ (float available-rows) hours))
+         (rows available-rows)
+         (task-columns (cl-mapcar (lambda (entries date)
+                                   (cfw:modern--entry-lines entries date cell-width task-lines t))
+                                 untimed days)))
     (insert (make-string gutter ?\s)
             (mapconcat (lambda (pair) (cfw:modern--day-heading (car pair) (length (cdr pair)) cell-width 'timeline))
                        (cl-mapcar #'cons days all-entries) (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")
     (dotimes (row task-lines)
       (insert (cfw:modern--fit (if (= row 0) "全天" "") gutter 'cfw:modern-muted))
       (insert (mapconcat
-               (lambda (pair)
-                 (let* ((date (car pair)) (entries (cdr pair)) (entry (nth row entries)))
-                   (cond ((and (= row (1- task-lines)) (> (length entries) task-lines))
-                          (cfw:modern--more (- (length entries) row) cell-width date))
-                         (entry (cfw:modern--entry-line entry (cfw:modern--label entry) cell-width date))
-                         (t (propertize (make-string cell-width ?\s) 'cfw:date date)))))
-               (cl-mapcar #'cons days untimed) (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n"))
+               (lambda (lines) (nth row lines)) task-columns
+               (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n"))
     (insert (cfw:rt (make-string width ?─) 'cfw:modern-rule) "\n")
-    (let ((day-lines (cl-mapcar (lambda (entries date)
-                                (cfw:modern--time-column entries date cell-width rows (* first-hour 60) lines-per-hour))
-                              timed days)))
+    (let* ((day-lines (cl-mapcar (lambda (entries date)
+                                 (cfw:modern--time-column entries date cell-width rows (* first-hour 60) lines-per-hour))
+                               timed days))
+           (hidden (cl-mapcar #'cfw:modern--hidden-count timed day-lines)))
       (dotimes (row rows)
-        (insert (cfw:modern--fit (if (= (% row lines-per-hour) 0)
-                                   (format "%02d:00" (+ first-hour (/ row lines-per-hour))) "")
+        (insert (cfw:modern--fit (if (or (= row 0)
+                                       (/= (floor (/ row (float lines-per-hour)))
+                                           (floor (/ (1- row) (float lines-per-hour)))))
+                                   (format "%02d:00" (+ first-hour (floor (/ row (float lines-per-hour))))) "")
                                gutter 'cfw:modern-muted)
                 (mapconcat (lambda (lines) (nth row lines)) day-lines
-                           (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")))))
+                           (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n"))
+      (when (cl-some (lambda (count) (> count 0)) hidden)
+        (insert (cfw:modern--fit "更多" gutter 'cfw:modern-muted)
+                (mapconcat (lambda (pair)
+                             (if (> (cdr pair) 0) (cfw:modern--more (cdr pair) cell-width (car pair))
+                               (propertize (make-string cell-width ?\s) 'cfw:date (car pair))))
+                           (cl-mapcar #'cons days hidden) (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")))))
 
-(defun cfw:modern--resize-now (buffer)
-  "Refit BUFFER after its window geometry changes."
+(defun cfw:modern-details-layout (date model)
+  "Return every item on DATE in MODEL, in the same order as the overview.
+Full titles, times, locations and descriptions retain their source bindings."
+  (let ((entries (cfw:modern--entries model date))
+        (holiday (cfw:model-get-holiday-by-date date model))
+        (annotation (cfw:model-get-annotation-by-date date model)))
+    (concat (format "* %s · %s · %d 项\n" (cfw:strtime date)
+                    (calendar-day-name date) (length entries))
+            (when (or holiday annotation)
+              (concat (mapconcat #'identity (delq nil (list holiday annotation)) " / ") "\n"))
+            "\n"
+            (mapconcat
+             (lambda (entry)
+               (let* ((source (plist-get entry :source))
+                      (location (plist-get entry :location))
+                      (description (plist-get entry :description))
+                      (begin (plist-get entry :begin))
+                      (heading (apply #'propertize (concat "** " (cfw:modern--label entry))
+                                      (cfw:extract-text-props (plist-get entry :text)
+                                                             'face 'font-lock-face 'display 'invisible))))
+                 (propertize
+                  (concat heading "\n"
+                          (when source
+                            (concat "来源：" (cfw:source-name source) "\n"))
+                          (when begin
+                            (format "日期：%s — %s\n" (cfw:strtime begin)
+                                    (cfw:strtime (plist-get entry :finish-date))))
+                          (when (and location (not (string-empty-p location)))
+                            (concat "地点：" (replace-regexp-in-string "[\n\r]+" " " location) "\n"))
+                          (when (and description (not (string-empty-p description)))
+                            (concat "\n" (replace-regexp-in-string "^" "  " description) "\n")))
+                  'cfw:date date 'cfw:row-count (plist-get entry :index)
+                  ;; Org fontification owns `keymap'; keep the source action in
+                  ;; our own property so RET works after highlighting and folding.
+                  'cfw:source-command (plist-get entry :command))))
+             entries "\n\n") "\n")))
+
+(defun cfw:modern--resized-p (window)
+  "Whether WINDOW's character or pixel dimensions changed."
+  (or (not (equal cfw:modern--dimensions (cons (window-body-width window) (window-body-height window))))
+      (not (equal cfw:modern--pixel-dimensions (cons (window-body-width window t) (window-body-height window t))))))
+
+(defun cfw:modern-refit-buffer (buffer)
+  "Refit BUFFER immediately after a popup or other window change."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
+      (when (timerp cfw:modern--resize-timer) (cancel-timer cfw:modern--resize-timer))
       (setq cfw:modern--resize-timer nil)
       (when-let* ((window (get-buffer-window buffer t))
-                  (component (and (eq cfw:display-style 'modern) (cfw:cp-get-component))))
-        (unless (equal cfw:modern--dimensions (cons (window-body-width window) (window-body-height window)))
+                  (component (and (not cfw:modern--rendering)
+                                  (eq cfw:display-style 'modern)
+                                  (local-variable-p 'cfw:component)
+                                  (buffer-local-value 'cfw:component buffer))))
+        (when (cfw:modern--resized-p window)
           (with-selected-window window (cfw:cp-update component)))))))
 
 (defun cfw:modern--resize (frame)
@@ -413,45 +517,73 @@ WIDTH, ROWS, FIRST-MINUTE and LINES-PER-HOUR define its geometry."
     (with-current-buffer (window-buffer window)
       (when (and (eq major-mode 'cfw:calendar-mode) (eq cfw:display-style 'modern)
                  (not cfw:modern--resize-timer)
-                 (not (equal cfw:modern--dimensions (cons (window-body-width window) (window-body-height window)))))
+                 (cfw:modern--resized-p window))
         (setq cfw:modern--resize-timer
-              (run-with-idle-timer 0.1 nil #'cfw:modern--resize-now (current-buffer)))))))
+              (run-at-time 0.01 nil #'cfw:modern-refit-buffer (current-buffer)))))))
 
 (defun cfw:modern-render (component)
   "Render COMPONENT using compact cards and time blocks."
-  (let* ((dest (cfw:component-dest component)) (view (cfw:component-view component))
+  (let* ((cfw:modern--rendering t)
+         (dest (cfw:component-dest component)) (view (cfw:component-view component))
          (window (and (eq (cfw:dest-type dest) 'buffer) (get-buffer-window (current-buffer) t)))
          (width (max 20 (1- (if window (window-body-width window) (cfw:dest-width dest)))))
-         ;; Two spare lines cover rounding of font metrics and the last newline.
-         (height (max 12 (- (if window (window-body-height window) (cfw:dest-height dest)) 2)))
+         ;; CJK glyphs can be taller than frame-char-height. Reuse their measured
+         ;; height, then verify the rendered pixels before accepting the layout.
+         (height (max 12 (if window
+                                (floor (/ (window-body-height window t)
+                                          (float (or cfw:modern--line-height (frame-char-height (window-frame window))))))
+                              (cfw:dest-height dest))))
          (model (pcase view ('month (cfw:view-month-model (cfw:component-model component)))
                        ('two-weeks (cfw:view-two-weeks-model (cfw:component-model component)))
                        ('week (cfw:view-week-model (cfw:component-model component)))
                        (_ (let ((date (cfw:k 'init-date (cfw:component-model component))))
                             (cfw:view-model-make-common-data-for-days (cfw:component-model component) date date)))))
          (header (cfw:modern--header component model width))
-         (body-height (max 4 (- height (length header) 2))))
+         (body-height (max 4 (- height (length header) 2)))
+         (begin (point)) (attempts 0) (height-limit most-positive-fixnum) (retry t))
     (setf (cfw:component-model component) model)
     (setq-local cfw:navigation-layout
                 (when (eq view 'two-weeks)
                   (if (>= width 70) 'two-columns 'single-column)))
     (when window
       (setq-local line-spacing 0)
-      (setq cfw:modern--dimensions (cons (window-body-width window) (window-body-height window))))
-    (dolist (line header) (insert line "\n"))
-    (cond
-     ((and (memq view '(day week)) (>= width 70))
-      (cfw:modern--timeline model (if (eq view 'week) (car (cfw:k 'weeks model)) (cfw:k 'days model)) width body-height))
-     ((and (eq view 'two-weeks) (>= width 70))
-      (cfw:modern--cards model (cl-mapcar #'list (car (cfw:k 'weeks model)) (cadr (cfw:k 'weeks model))) width body-height))
-     ((and (eq view 'month) (>= width 70))
-      (cfw:modern--cards model (cfw:k 'weeks model) width body-height t))
-     (t
-      ;; Narrow split windows use full-width day cards instead of squeezed grids.
-      (cfw:modern--cards model (mapcar #'list (cfw:enumerate-days (cfw:k 'begin-date model) (cfw:k 'end-date model)))
-                         width body-height)))
-    (insert (cfw:rt (make-string width ?─) 'cfw:modern-rule) "\n"
-            (cfw:modern--fit " s / SPC 查看当天详情   r 刷新   t 今天   D/W/T/M 切换视图" width 'cfw:modern-muted))))
+      (setq cfw:modern--dimensions (cons (window-body-width window) (window-body-height window))
+            cfw:modern--pixel-dimensions (cons (window-body-width window t) (window-body-height window t))))
+    (while retry
+      (delete-region begin (point))
+      (setq body-height (max 4 (- height (length header) 2)))
+      (dolist (line header) (insert line "\n"))
+      (cond
+       ((and (memq view '(day week)) (>= width 70))
+        (cfw:modern--timeline model (if (eq view 'week) (car (cfw:k 'weeks model)) (cfw:k 'days model)) width body-height))
+       ((and (eq view 'two-weeks) (>= width 70))
+        (cfw:modern--cards model (cl-mapcar #'list (car (cfw:k 'weeks model)) (cadr (cfw:k 'weeks model))) width body-height))
+       ((and (eq view 'month) (>= width 70))
+        (cfw:modern--cards model (cfw:k 'weeks model) width body-height t))
+       (t
+        ;; Narrow split windows use full-width day cards instead of squeezed grids.
+        (cfw:modern--cards model (mapcar #'list (cfw:enumerate-days (cfw:k 'begin-date model) (cfw:k 'end-date model)))
+                           width body-height)))
+      (insert (cfw:rt (make-string width ?─) 'cfw:modern-rule) "\n"
+              (cfw:modern--fit " s 查看详情（详情内 RET 跳转原任务）   r 刷新   t 今天   D/W/T/M 切换视图" width 'cfw:modern-muted))
+      (setq retry nil)
+      (when window
+        (let* ((pixels (cdr (window-text-pixel-size window begin (point))))
+               (rows (max 1 (count-lines begin (point))))
+               (available (window-body-height window t)))
+          (setq cfw:modern--line-height (max (frame-char-height (window-frame window))
+                                             (/ (float pixels) rows)))
+          (when (> pixels available) (setq height-limit (1- height)))
+          ;; Use the measured spare pixels, including partial hours and card
+          ;; rows. A failed height is an upper bound, preventing resize loops.
+          (let* ((delta (floor (/ (- available pixels) cfw:modern--line-height)))
+                 (target (max 12 (min height-limit (+ height delta)))))
+            (when (and (/= target height) (< attempts 4))
+              (setq height target retry t)
+              (cl-incf attempts)))
+          (when (<= pixels available)
+            (set-window-start window (point-min) t)
+            (set-window-vscroll window 0)))))))
 
 (add-hook 'window-size-change-functions #'cfw:modern--resize)
 

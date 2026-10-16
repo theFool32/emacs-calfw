@@ -4,6 +4,38 @@
 (require 'calfw-org)
 (require 'calfw-modern)
 
+(ert-deftest cfw-regression-details-return-jumps-to-org-source-in-the-main-window ()
+  (save-window-excursion
+    (let ((source (generate-new-buffer " *cfw-org-jump-source*"))
+          (calendar (generate-new-buffer " *cfw-org-jump-calendar*"))
+          (cfw:details-buffer-name " *cfw-org-jump-details*"))
+      (unwind-protect
+          (let* ((marker (with-current-buffer source
+                           (org-mode)
+                           (insert "* Other\nOther body\n* Target\nTarget body\n")
+                           (goto-char (point-min)) (search-forward "* Target")
+                           (beginning-of-line) (point-marker)))
+                 (item (propertize "TODO Target" 'org-marker marker 'keymap cfw:org-text-keymap))
+                 (date '(10 16 2026))
+                 (cfw:display-style 'modern) (cfw:display-calendar-holidays nil)
+                 (height (window-body-height)))
+            (switch-to-buffer calendar)
+            (cfw:create-calendar-component-buffer
+             :buffer calendar :date date :view 'day
+             :contents-sources (list (make-cfw:source :name "Org"
+                                                    :data (lambda (&rest _) (list (list date item))))))
+            (cfw:show-details-command)
+            (goto-char (point-min)) (search-forward "来源：Org")
+            (should (eq #'cfw:details-open-item-command (key-binding (kbd "RET"))))
+            (call-interactively (key-binding (kbd "RET")))
+            (should (eq source (window-buffer)))
+            (should (= (marker-position marker) (point)))
+            (should (= height (window-body-height)))
+            (should-not (get-buffer cfw:details-buffer-name)))
+        (when-let* ((details (get-buffer cfw:details-buffer-name))) (kill-buffer details))
+        (kill-buffer source)
+        (kill-buffer calendar)))))
+
 (ert-deftest cfw-regression-fast-helper-does-not-use-open-wait ()
   (let ((cfw:macos-query-timeout 1) files)
     (cl-letf (((symbol-function 'cfw:macos--ensure-helper) (lambda () "unused"))

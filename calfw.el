@@ -62,6 +62,14 @@
 (require 'holidays)
 (require 'format-spec)
 
+(declare-function cfw:modern-details-layout "calfw-modern" (date model))
+(declare-function cfw:modern-refit-buffer "calfw-modern" (buffer))
+(declare-function evil-set-initial-state "evil-core" (mode state))
+(declare-function evil-make-overriding-map "evil-core" (keymap &optional state copy))
+(autoload 'org-mode "org")
+(declare-function org-fold-show-all "org-fold")
+(declare-function org-fold-hide-sublevels "org-fold" (levels))
+
 
 
 ;;; Constants
@@ -2700,68 +2708,77 @@ Movement is forward if NUM is negative."
 
 (defvar cfw:details-buffer-name "*cfw:details*" "[internal]")
 (defvar cfw:details-window-size 20 "Default detail buffer window size.")
+(defvar-local cfw:main-buf nil "Calendar buffer that opened these details.")
 
 (defun cfw:details-popup (text)
   "Popup the buffer to show details.
 TEXT is a content to show."
   (let ((buf (get-buffer cfw:details-buffer-name))
-        (before-win-num (length (window-list)))
         (main-buf (current-buffer)))
     (unless (and buf (eq (buffer-local-value 'major-mode buf)
                          'cfw:details-mode))
       (setq buf (get-buffer-create cfw:details-buffer-name))
       (with-current-buffer buf
-        (cfw:details-mode)
-        (set (make-local-variable 'cfw:before-win-num) before-win-num)))
+        (cfw:details-mode)))
     (with-current-buffer buf
       (let (buffer-read-only)
         (set (make-local-variable 'cfw:main-buf) main-buf)
         (erase-buffer)
         (insert text)
-        (goto-char (point-min))))
-    (pop-to-buffer buf)))
+        (goto-char (point-min))
+        (when (derived-mode-p 'org-mode)
+          (org-fold-show-all)
+          (org-fold-hide-sublevels 2)
+          (font-lock-mode 1)
+          (font-lock-flush))
+        (set-buffer-modified-p nil)))
+    (pop-to-buffer buf)
+    (when (eq cfw:display-style 'modern)
+      (cfw:modern-refit-buffer main-buf))))
 
 (defun cfw:details-layout (date model)
   "Layout details and return the text.
 DATE is a date to show. MODEL is model object."
-  (let* ((EOL "\n")
-         (HLINE (cfw:rt (concat (make-string (window-width) ?-) EOL) 'cfw:face-grid))
-         (holiday (cfw:model-get-holiday-by-date date model))
-         (annotation (cfw:model-get-annotation-by-date date model))
-         (periods (cfw:model-get-periods-by-date date model))
-         (contents (cfw:render-sort-contents
-                    (cfw:render-event-details-content
-                     (cfw:model-get-contents-by-date date model))
-                    (cfw:model-get-sorter model)))
-         (row-count -1))
-    (concat
-     (cfw:rt (concat "Schedule on " (cfw:strtime date) " (") 'cfw:face-header)
-     (cfw:rt (calendar-day-name date)
-             (cfw:render-get-week-face (calendar-day-of-week date) 'cfw:face-header))
-     (cfw:rt (concat ")" EOL) 'cfw:face-header)
-     (when (or holiday annotation)
-       (concat
-        (and holiday (cfw:rt holiday 'cfw:face-holiday))
-        (and holiday annotation " / ")
-        (and annotation (cfw:rt annotation 'cfw:face-annotation))
-        EOL))
-     HLINE
-     (cl-loop for (begin end summary) in periods
-           for prefix = (propertize
-                         (concat (cfw:strtime begin) " - " (cfw:strtime end) " : ")
-                         'face (cfw:render-get-face-period summary 'cfw:face-periods)
-                         'font-lock-face (cfw:render-get-face-period summary 'cfw:face-periods)
-                         'cfw:row-count (cl-incf row-count))
-           concat
-           (concat prefix " " summary EOL))
+  (if (eq cfw:display-style 'modern)
+      (progn (require 'calfw-modern) (cfw:modern-details-layout date model))
+    (let* ((EOL "\n")
+           (HLINE (cfw:rt (concat (make-string (window-width) ?-) EOL) 'cfw:face-grid))
+           (holiday (cfw:model-get-holiday-by-date date model))
+           (annotation (cfw:model-get-annotation-by-date date model))
+           (periods (cfw:model-get-periods-by-date date model))
+           (contents (cfw:render-sort-contents
+                      (cfw:render-event-details-content
+                       (cfw:model-get-contents-by-date date model))
+                      (cfw:model-get-sorter model)))
+           (row-count -1))
+      (concat
+       (cfw:rt (concat "Schedule on " (cfw:strtime date) " (") 'cfw:face-header)
+       (cfw:rt (calendar-day-name date)
+               (cfw:render-get-week-face (calendar-day-of-week date) 'cfw:face-header))
+       (cfw:rt (concat ")" EOL) 'cfw:face-header)
+       (when (or holiday annotation)
+	 (concat
+          (and holiday (cfw:rt holiday 'cfw:face-holiday))
+          (and holiday annotation " / ")
+          (and annotation (cfw:rt annotation 'cfw:face-annotation))
+          EOL))
+       HLINE
+       (cl-loop for (begin end summary) in periods
+		for prefix = (propertize
+                              (concat (cfw:strtime begin) " - " (cfw:strtime end) " : ")
+                              'face (cfw:render-get-face-period summary 'cfw:face-periods)
+                              'font-lock-face (cfw:render-get-face-period summary 'cfw:face-periods)
+                              'cfw:row-count (cl-incf row-count))
+		concat
+		(concat prefix " " summary EOL))
 
-     (cl-loop for i in contents
-           for f = (cfw:render-get-face-content i 'cfw:face-default-content)
-           concat
-           (concat "- " (propertize
-                         i 'face f 'font-lock-face f
-                         'cfw:row-count (cl-incf row-count))
-                   EOL)))))
+       (cl-loop for i in contents
+		for f = (cfw:render-get-face-content i 'cfw:face-default-content)
+		concat
+		(concat "- " (propertize
+                              i 'face f 'font-lock-face f
+                              'cfw:row-count (cl-incf row-count))
+			EOL))))))
 
 (defvar cfw:details-mode-map
   (cfw:define-keymap
@@ -2773,38 +2790,54 @@ DATE is a date to show. MODEL is model object."
      ("p"       . cfw:details-navi-prev-command)
      ("b"       . cfw:details-navi-prev-command)
      ("<left>"  . cfw:details-navi-prev-command)
-     ("TAB"     . cfw:details-navi-next-item-command)
-     ("C-i"     . cfw:details-navi-next-item-command)
-     ("<backtab>" . cfw:details-navi-prev-item-command)
-     ("S-TAB"     . cfw:details-navi-prev-item-command)
+     ("RET"     . cfw:details-open-item-command)
+     ("<return>" . cfw:details-open-item-command)
+     ("TAB"     . org-cycle)
+     ("<tab>"   . org-cycle)
+     ("C-i"     . org-cycle)
+     ("<backtab>" . org-shifttab)
+     ("S-TAB"     . org-shifttab)
      ))
   "Default key map for the details buffer.")
 
 (defvar cfw:details-mode-hook nil "")
 
-(defun cfw:details-mode ()
-  "Set up major mode `cfw:details-mode'.
+(define-derived-mode cfw:details-mode org-mode "Calendar Details"
+  "Read-only Org view of a complete calendar day.
 
 \\{cfw:details-mode-map}"
-  (kill-all-local-variables)
-  (setq truncate-lines t)
-  (use-local-map cfw:details-mode-map)
-  (setq major-mode 'cfw:details-mode
-        mode-name "Calendar Details Mode")
-  (setq buffer-undo-list t
-        buffer-read-only t)
-  (run-hooks 'cfw:details-mode-hook))
+  (setq-local truncate-lines nil
+              word-wrap t
+              buffer-undo-list t
+              buffer-offer-save nil
+              buffer-read-only t))
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'cfw:details-mode 'motion)
+  (evil-make-overriding-map cfw:details-mode-map 'motion))
 
 (defun cfw:details-kill-buffer-command ()
-  "Kill buffer and delete window."
+  "Close details and refit the calendar in its restored window."
   (interactive)
-  (let ((win-num (length (window-list)))
-        (next-win (get-buffer-window cfw:main-buf)))
-    (when (and (not (one-window-p))
-               (> win-num cfw:before-win-num))
-      (delete-window))
-    (kill-buffer cfw:details-buffer-name)
-    (when next-win (select-window next-win))))
+  (let ((main-buf cfw:main-buf)
+        (window (get-buffer-window (current-buffer) t)))
+    (if window (quit-window t window) (kill-buffer (current-buffer)))
+    (when-let* ((main-window (and (buffer-live-p main-buf) (get-buffer-window main-buf t))))
+      (select-window main-window)
+      (when (eq cfw:display-style 'modern)
+        (cfw:modern-refit-buffer main-buf)))))
+
+(defun cfw:details-open-item-command ()
+  "Open the original source of the item at point, including from its body."
+  (interactive)
+  (when (and (derived-mode-p 'org-mode) (not (org-before-first-heading-p)))
+    (org-back-to-heading t))
+  (let* ((map (get-text-property (point) 'keymap))
+         (command (or (get-text-property (point) 'cfw:source-command)
+                      (and (keymapp map) (lookup-key map (kbd "RET"))))))
+    (unless (and (commandp command) (not (eq command #'cfw:details-open-item-command)))
+      (user-error "This item has no source to open; move to a task heading"))
+    (call-interactively command)))
 
 (defun cfw:details-navi-next-command (&optional num)
   (interactive "p")

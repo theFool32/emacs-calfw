@@ -178,6 +178,24 @@ additional package is required. The layout takes inspiration from
   untimed tasks and all-day items appear above the time grid. Overlapping
   events use separate lanes; crowded lanes show a clickable overflow count.
 - **Month**: compact day cards retain the familiar seven-column overview.
+- Month items use one line and a short start time. Other day cards switch
+  to one-line summaries when long titles would crowd out another item.
+- All views show exact, highlighted `+N` counts for items that cannot fit,
+  including all-day lists and overlapping time blocks. Click the count or
+  press `RET`, `s` or `SPC` on it to open the complete day. Timelines also
+  show a bottom summary counting each entirely hidden appointment once.
+- Day details keep the overview's order (untimed/all-day first, timed items
+  by start time, completed items last). `cfw:details-mode` derives from
+  Org mode: each item is a heading with full times, source, location and
+  description below. Initially only headings are expanded. Text wraps;
+  `TAB`/`S-TAB` fold items/the day. Existing
+  Org links and source jump bindings are retained. `n`/`p` change dates and
+  `q` closes the details. The view is read-only and still matches the same
+  `cfw:details-mode` Popper rule.
+- In details, move to an item's heading or body and press `RET` to open its
+  source. Org items close the popup and jump to the original heading in the
+  main window. `TAB` remains folding. You can also use `TAB` in the calendar
+  to select a visible item and `RET` to follow its source binding.
 - Source labels live at the top, wrap within the available width, and show
   full account names on hover. Colour accents and tinted event backgrounds
   adapt to the frame's dark or light background.
@@ -187,6 +205,11 @@ additional package is required. The layout takes inspiration from
 
 `cfw:modern-day-start` and `cfw:modern-day-end` set the normal visible hours
 (default 08:00–20:00); the range expands to include appointments outside them.
+When the full range is taller than the window, the time axis compresses so
+early and late appointments and the overflow summary remain accessible.
+GUI layouts verify actual text pixel height, including taller CJK glyphs.
+Opening/closing details refits the calendar immediately; other window
+resizes use a short regular timer so refitting does not wait for input idle.
 Org markers, link bindings, date navigation and the complete day details are
 preserved. The renderer does not modify tasks or events. To retain the original
 presentation, set `cfw:display-style` to `classic` and reopen or refresh.
