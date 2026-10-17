@@ -325,6 +325,18 @@ COMPACT uses just the day number for a monthly grid."
              (unless (= row-number (1- (length rows)))
                (insert (cfw:rt (make-string width ?─) 'cfw:modern-rule) "\n")))))
 
+(defun cfw:modern--month-weekdays (model width)
+  "Return weekday headings aligned with MODEL's month grid at WIDTH."
+  (let* ((days (cfw:k 'headers model))
+         (gap "  │  ")
+         (cell-width (max 1 (/ (- width (* (1- (length days)) (string-width gap)))
+                               (length days))))
+         (names ["周日" "周一" "周二" "周三" "周四" "周五" "周六"]))
+    (mapconcat (lambda (day)
+                 (cfw:modern--fit (concat " " (aref names day)) cell-width
+                                  (if (memq day '(0 6)) 'cfw:modern-weekend 'cfw:modern-day)))
+               days (cfw:rt (copy-sequence gap) 'cfw:modern-rule))))
+
 (defun cfw:modern--lanes (entries first-minute lines-per-hour)
   "Assign ENTRIES to nonoverlapping display lanes.
 FIRST-MINUTE and LINES-PER-HOUR specify the time-to-row mapping."
@@ -538,7 +550,9 @@ Full titles, times, locations and descriptions retain their source bindings."
                        ('week (cfw:view-week-model (cfw:component-model component)))
                        (_ (let ((date (cfw:k 'init-date (cfw:component-model component))))
                             (cfw:view-model-make-common-data-for-days (cfw:component-model component) date date)))))
-         (header (cfw:modern--header component model width))
+         (header (append (cfw:modern--header component model width)
+                         (when (and (eq view 'month) (>= width 70))
+                           (list (cfw:modern--month-weekdays model width)))))
          (body-height (max 4 (- height (length header) 2)))
          (begin (point)) (attempts 0) (height-limit most-positive-fixnum) (retry t))
     (setf (cfw:component-model component) model)
