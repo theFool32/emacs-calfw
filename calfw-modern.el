@@ -169,11 +169,13 @@ The range expands to include earlier and later appointments."
                        (and (boundp 'org-done-keywords-for-agenda) org-done-keywords-for-agenda))))
     (when (and start (not event))
       (let ((time (get-text-property 0 'time text)))
-        (when (and (stringp time) (string-match "-\\([0-9][0-9]\\):\\([0-9][0-9]\\)" time))
+        ;; Org writes single-digit hours without padding, e.g. " 9:00-9:30".
+        (when (and (stringp time) (string-match "-\\([0-9]?[0-9]\\):\\([0-9][0-9]\\)" time))
           (setq finish (+ (* 60 (string-to-number (match-string 1 time)))
                           (string-to-number (match-string 2 time)))))))
     (when start
-      (setq finish (or finish (+ start (if (and (numberp duration) (> duration 0)) duration 60))))
+      ;; Org agenda stores `duration' as a float; labels format minutes with %d.
+      (setq finish (or finish (+ start (if (and (numberp duration) (> duration 0)) (round duration) 60))))
       (when (and begin (not (equal date begin))) (setq start 0))
       (when (and end (not (equal date end))) (setq finish 1440))
       (when (<= finish start) (setq finish 1440)))

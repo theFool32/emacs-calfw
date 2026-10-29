@@ -361,6 +361,20 @@
     (should (string-prefix-p "09:30–10:45 " (cfw:modern--label native)))
     (should (equal "09:30–10:45 TODO Task" (cfw:modern--label org)))))
 
+(ert-deftest cfw-modern-org-single-digit-hour-range-is-read ()
+  ;; Org agenda pads single-digit hours with a space, e.g. " 9:00-9:30".
+  (let ((org (cfw:modern--entry (propertize "09:00 TODO Task" 'time-of-day 900 'time " 9:00-9:30")
+                                cfw-modern-test-date)))
+    (should (= 570 (plist-get org :end)))
+    (should (equal "09:00–09:30 TODO Task" (cfw:modern--label org)))))
+
+(ert-deftest cfw-modern-org-float-duration-gives-integer-end ()
+  ;; Org agenda stores `duration' in minutes as a float.
+  (let ((org (cfw:modern--entry (propertize "09:00 TODO Task" 'time-of-day 900 'duration 30.0)
+                                cfw-modern-test-date)))
+    (should (eql 570 (plist-get org :end)))
+    (should (equal "09:00–09:30 TODO Task" (cfw:modern--label org)))))
+
 (ert-deftest cfw-modern-overnight-event-clips-to-each-day ()
   (let* ((begin '(10 16 2026)) (end '(10 17 2026))
          (event (make-cfw:event :title "Overnight" :start-date begin :end-date end :start-time '(23 0) :end-time '(1 0)))
