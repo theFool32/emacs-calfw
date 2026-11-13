@@ -82,6 +82,23 @@
         (cfw:modern--cards model rows 100 height)
         (should (= height (count-lines (point-min) (point-max))))))))
 
+(ert-deftest cfw-modern-grid-fills-the-whole-width ()
+  (let ((model '((headers 0 1 2 3 4 5 6) (sorter . string-lessp)))
+        (rows '(((10 11 2026) (10 12 2026) (10 13 2026))
+                ((10 18 2026) (10 19 2026) (10 20 2026)))))
+    ;; Widths whose gaps leave a remainder after integer division.
+    (dolist (width '(100 101 102 103 120 137))
+      (with-temp-buffer
+        (insert (cfw:modern--month-weekdays model width) "\n")
+        (cfw:modern--cards model rows width 10)
+        (cfw:modern--timeline model (list cfw-modern-test-date) width 12)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (should (= width (string-width
+                            (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position)))))
+          (forward-line 1))))))
+
 (ert-deftest cfw-modern-timeline-keeps-partial-hour-height ()
   (let ((model '((contents) (sorter . string-lessp))))
     (dolist (height '(31 32 33 34 35 36 37 38 39))

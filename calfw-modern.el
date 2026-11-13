@@ -304,6 +304,17 @@ COMPACT uses just the day number for a monthly grid."
                 'face (cond (today 'cfw:modern-today)
                             (weekend 'cfw:modern-weekend) (t 'cfw:modern-day)))))
 
+(defun cfw:modern--cell-widths (columns width gap)
+  "Split WIDTH into COLUMNS cell widths separated by GAP.
+The widths sum to exactly WIDTH, spreading the remainder over the
+leftmost cells so every row keeps the right edge aligned with the
+rules above and below it."
+  (let* ((usable (max columns (- width (* (1- columns) (string-width gap)))))
+         (base (/ usable columns))
+         (extra (% usable columns)))
+    (cl-loop for column below columns
+             collect (+ base (if (< column extra) 1 0)))))
+
 (defun cfw:modern--card (model date width height &optional compact)
   "Return HEIGHT lines of a day card for MODEL and DATE at WIDTH."
   (let* ((entries (cfw:modern--entries model date))
@@ -314,13 +325,15 @@ COMPACT uses just the day number for a monthly grid."
 (defun cfw:modern--cards (model rows width height &optional compact)
   "Insert ROWS of day cards within WIDTH and HEIGHT for MODEL."
   (let* ((columns (length (car rows))) (gap "  │  ")
-         (cell-width (max 1 (/ (- width (* (1- columns) (string-width gap))) columns)))
+         (cell-widths (cfw:modern--cell-widths columns width gap))
          (row-count (length rows))
          (card-lines (max (* 2 row-count) (- height (1- row-count)))))
     (cl-loop for row in rows for row-number from 0 do
              (let* ((cell-height (+ (/ card-lines row-count)
                                     (if (< row-number (% card-lines row-count)) 1 0)))
-                    (cards (mapcar (lambda (date) (cfw:modern--card model date cell-width cell-height compact)) row)))
+                    (cards (cl-mapcar (lambda (date cell-width)
+                                        (cfw:modern--card model date cell-width cell-height compact))
+                                      row cell-widths)))
                (dotimes (line cell-height)
                  (insert (mapconcat (lambda (card) (nth line card)) cards
                                     (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")))
@@ -331,13 +344,12 @@ COMPACT uses just the day number for a monthly grid."
   "Return weekday headings aligned with MODEL's month grid at WIDTH."
   (let* ((days (cfw:k 'headers model))
          (gap "  │  ")
-         (cell-width (max 1 (/ (- width (* (1- (length days)) (string-width gap)))
-                               (length days))))
+         (cell-widths (cfw:modern--cell-widths (length days) width gap))
          (names ["周日" "周一" "周二" "周三" "周四" "周五" "周六"]))
-    (mapconcat (lambda (day)
-                 (cfw:modern--fit (concat " " (aref names day)) cell-width
-                                  (if (memq day '(0 6)) 'cfw:modern-weekend 'cfw:modern-day)))
-               days (cfw:rt (copy-sequence gap) 'cfw:modern-rule))))
+    (mapconcat (lambda (pair)
+                 (cfw:modern--fit (concat " " (aref names (car pair))) (cdr pair)
+                                  (if (memq (car pair) '(0 6)) 'cfw:modern-weekend 'cfw:modern-day)))
+               (cl-mapcar #'cons days cell-widths) (cfw:rt (copy-sequence gap) 'cfw:modern-rule))))
 
 (defun cfw:modern--lanes (entries first-minute lines-per-hour)
   "Assign ENTRIES to nonoverlapping display lanes.
@@ -420,7 +432,7 @@ WIDTH, ROWS, FIRST-MINUTE and LINES-PER-HOUR define its geometry."
 (defun cfw:modern--timeline (model days width height)
   "Insert source-coloured time blocks for DAYS in MODEL at WIDTH and HEIGHT."
   (let* ((gutter 6) (gap " │ ") (columns (length days))
-         (cell-width (max 1 (/ (- width gutter (* (1- columns) (string-width gap))) columns)))
+         (cell-widths (cfw:modern--cell-widths columns (- width gutter) gap))
          (all-entries (mapcar (lambda (date) (cfw:modern--entries model date)) days))
          (timed (mapcar (lambda (entries) (cl-remove-if-not (lambda (entry) (plist-get entry :start)) entries)) all-entries))
          (untimed (mapcar (lambda (entries) (cl-remove-if (lambda (entry) (plist-get entry :start)) entries)) all-entries))
@@ -438,21 +450,23 @@ WIDTH, ROWS, FIRST-MINUTE and LINES-PER-HOUR define its geometry."
          (available-rows (max 1 (- height task-lines 3)))
          (lines-per-hour (/ (float available-rows) hours))
          (rows available-rows)
-         (task-columns (cl-mapcar (lambda (entries date)
-                                   (cfw:modern--entry-lines entries date cell-width task-lines t))
-                                 untimed days)))
+         (task-columns (cl-mapcar (lambda (entries date cell-width)
+                                    (cfw:modern--entry-lines entries date cell-width task-lines t))
+                                  untimed days cell-widths)))
     (insert (make-string gutter ?\s)
-            (mapconcat (lambda (pair) (cfw:modern--day-heading (car pair) (length (cdr pair)) cell-width 'timeline))
-                       (cl-mapcar #'cons days all-entries) (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")
+            (mapconcat (lambda (spec)
+                         (cfw:modern--day-heading (nth 0 spec) (length (nth 1 spec)) (nth 2 spec) 'timeline))
+                       (cl-mapcar #'list days all-entries cell-widths)
+                       (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")
     (dotimes (row task-lines)
       (insert (cfw:modern--fit (if (= row 0) "全天" "") gutter 'cfw:modern-muted))
       (insert (mapconcat
                (lambda (lines) (nth row lines)) task-columns
                (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n"))
     (insert (cfw:rt (make-string width ?─) 'cfw:modern-rule) "\n")
-    (let* ((day-lines (cl-mapcar (lambda (entries date)
-                                 (cfw:modern--time-column entries date cell-width rows (* first-hour 60) lines-per-hour))
-                               timed days))
+    (let* ((day-lines (cl-mapcar (lambda (entries date cell-width)
+                                   (cfw:modern--time-column entries date cell-width rows (* first-hour 60) lines-per-hour))
+                                 timed days cell-widths))
            (hidden (cl-mapcar #'cfw:modern--hidden-count timed day-lines)))
       (dotimes (row rows)
         (insert (cfw:modern--fit (if (or (= row 0)
@@ -464,10 +478,11 @@ WIDTH, ROWS, FIRST-MINUTE and LINES-PER-HOUR define its geometry."
                            (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n"))
       (when (cl-some (lambda (count) (> count 0)) hidden)
         (insert (cfw:modern--fit "更多" gutter 'cfw:modern-muted)
-                (mapconcat (lambda (pair)
-                             (if (> (cdr pair) 0) (cfw:modern--more (cdr pair) cell-width (car pair))
-                               (propertize (make-string cell-width ?\s) 'cfw:date (car pair))))
-                           (cl-mapcar #'cons days hidden) (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")))))
+                (mapconcat (lambda (spec)
+                             (if (> (nth 1 spec) 0) (cfw:modern--more (nth 1 spec) (nth 2 spec) (nth 0 spec))
+                               (propertize (make-string (nth 2 spec) ?\s) 'cfw:date (nth 0 spec))))
+                           (cl-mapcar #'list days hidden cell-widths)
+                           (cfw:rt (copy-sequence gap) 'cfw:modern-rule)) "\n")))))
 
 (defun cfw:modern-details-layout (date model)
   "Return every item on DATE in MODEL, in the same order as the overview.
